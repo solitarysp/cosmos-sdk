@@ -23,7 +23,7 @@ import (
 	"github.com/cosmos/cosmos-sdk/crypto/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	sdkerrors "github.com/cosmos/cosmos-sdk/types/errors"
-	"github.com/cosmos/go-bip39"
+	bip39 "github.com/cosmos/go-bip39"
 )
 
 // Backend options for Keyring
@@ -157,6 +157,16 @@ func NewInMemory(cdc codec.Codec, opts ...Option) Keyring {
 // as the backing keyring.
 func NewInMemoryWithKeyring(kr keyring.Keyring, cdc codec.Codec, opts ...Option) Keyring {
 	return newKeystore(kr, cdc, BackendMemory, opts...)
+}
+
+// NewFileBackendKeyringWithPassword returns an in file keyring using the specified keyring.Keyring
+// as the backing keyring.
+func NewFileBackendKeyringWithPassword(appName, backend, rootDir string, password string, opts ...Option) (Keyring, error) {
+	db, err := keyring.Open(newFileBackendKeyringConfigWithPassword(appName, rootDir, password))
+	if err != nil {
+		return nil, err
+	}
+	return newKeystore(db, nil, BackendFile, opts...), nil
 }
 
 // New creates a new instance of a keyring.
@@ -680,6 +690,17 @@ func newFileBackendKeyringConfig(name, dir string, buf io.Reader) keyring.Config
 	}
 }
 
+func NewFileBackendKeyringConfigWithPassword(name, dir string, password string) keyring.Config {
+	fileDir := filepath.Join(dir, keyringFileDirName)
+
+	return keyring.Config{
+		AllowedBackends:  []keyring.BackendType{keyring.FileBackend},
+		ServiceName:      name,
+		FileDir:          fileDir,
+		FilePasswordFunc: newRealPromptWithPassword(fileDir, password),
+	}
+}
+
 func newRealPrompt(dir string, buf io.Reader) func(string) (string, error) {
 	return func(prompt string) (string, error) {
 		keyhashStored := false
@@ -760,6 +781,55 @@ func newRealPrompt(dir string, buf io.Reader) func(string) (string, error) {
 			}
 
 			return pass, nil
+		}
+	}
+}
+
+func newRealPromptWithPassword(dir string, password string) func(string) (string, error) {
+	return func(prompt string) (string, error) {
+		keyhashStored := false
+		keyhashFilePath := filepath.Join(dir, "keyhash")
+
+		var keyhash []byte
+
+		_, err := os.Stat(keyhashFilePath)
+
+		switch {
+		case err == nil:
+			keyhash, err = os.ReadFile(keyhashFilePath)
+			if err != nil {
+				return "", fmt.Errorf("failed to read %s: %v", keyhashFilePath, err)
+			}
+
+			keyhashStored = true
+
+		case os.IsNotExist(err):
+			keyhashStored = false
+
+		default:
+			return "", fmt.Errorf("failed to open %s: %v", keyhashFilePath, err)
+		}
+
+		if keyhashStored {
+			if err := bcrypt.CompareHashAndPassword(keyhash, []byte(password)); err != nil {
+				fmt.Fprintln(os.Stderr, "incorrect passphrase")
+				return "", err
+			}
+
+			return password, nil
+		} else {
+			saltBytes := tmcrypto.CRandBytes(16)
+			passwordHash, err := bcrypt.GenerateFromPassword(saltBytes, []byte(password), 2)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				return "", err
+			}
+
+			if err := os.WriteFile(dir+"/keyhash", passwordHash, 0o555); err != nil {
+				return "", err
+			}
+
+			return password, nil
 		}
 	}
 }
